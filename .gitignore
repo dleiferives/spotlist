@@ -1,0 +1,26 @@
+# Base
+.DS_Store
+.idea
+*.log
+tmp/
+
+# Compiled
+*.elc
+
+# Packaging
+.cask/
+dist/
+
+# Temporary files
+*~
+\#*\#
+.\#*
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Editor backups
+*.bak
+*.swp
+*.swo
