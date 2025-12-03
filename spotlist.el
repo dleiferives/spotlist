@@ -213,23 +213,43 @@ automatic refreshing resumes."
 ;;; Global keymap
 (defvar spotlist-command-map
   (let ((map (make-sparse-keymap)))
-    (define-key map "r" #'spotlist-add-region)
-    (define-key map "l" #'spotlist-add-line)
-    (define-key map "s" #'spotlist-show)
-    (define-key map "c" #'spotlist-clear-all)
+    (define-key map (kbd "r") #'spotlist-add-region)
+    (define-key map (kbd "l") #'spotlist-add-line)
+    (define-key map (kbd "s") #'spotlist-show)
+    (define-key map (kbd "c") #'spotlist-clear-all)
     map)
-  "Keymap for SpotList commands.")
+  "Prefix keymap for SpotList commands.")
+
+(defcustom spotlist-global-prefix "C-c C-s"
+  "Global prefix key for SpotList commands."
+  :type 'string
+  :group 'spotlist)
+
+(defvar spotlist-global-mode-map (make-sparse-keymap)
+  "Keymap used by `spotlist-global-mode'.")
+
+(define-minor-mode spotlist-global-mode
+  "Toggle global SpotList keybindings."
+  :global t
+  :keymap spotlist-global-mode-map
+  (when spotlist-global-mode
+    ;; When enabling, (re)bind the prefix. When disabling, unbind it.
+    (define-key spotlist-global-mode-map
+      (kbd spotlist-global-prefix) spotlist-command-map)))
 
 ;;;###autoload
-(defun spotlist-setup-global-keys (&optional key)
-  "Install SpotList global key prefix.
-KEY is a key sequence string for the prefix (default: \"C-c C-s\").
-Example:
-  (spotlist-setup-global-keys)            ; uses C-c C-s
-  (spotlist-setup-global-keys \"C-c s\")  ; custom prefix"
-  (interactive)
-  (let ((prefix (or key "C-c C-s")))
-    (define-key global-map (kbd prefix) spotlist-command-map)))
+(defun spotlist-set-prefix (key)
+  "Change the global SpotList prefix to KEY at runtime.
+Reapplies it if `spotlist-global-mode' is enabled."
+  (interactive "sNew SpotList prefix (e.g. C-c s): ")
+  (setq spotlist-global-prefix key)
+  (when spotlist-global-mode
+    ;; Reinitialize the map so old binding is dropped and new one added.
+    (setq spotlist-global-mode-map (make-sparse-keymap))
+    (define-key spotlist-global-mode-map
+      (kbd spotlist-global-prefix) spotlist-command-map)
+    (spotlist-global-mode -1)
+    (spotlist-global-mode +1)))
 
 ;;; Mode definition
 
