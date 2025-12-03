@@ -211,19 +211,25 @@ automatic refreshing resumes."
     (apply #'spotlist-rgb-to-hex adjusted-rgb)))
 
 ;;; Global keymap
-
 (defvar spotlist-command-map
   (let ((map (make-sparse-keymap)))
-    (define-key map "r" 'spotlist-add-region)
-    (define-key map "l" 'spotlist-add-line)
-    (define-key map "s" 'spotlist-show)
-    (define-key map "c" 'spotlist-clear-all)
+    (define-key map "r" #'spotlist-add-region)
+    (define-key map "l" #'spotlist-add-line)
+    (define-key map "s" #'spotlist-show)
+    (define-key map "c" #'spotlist-clear-all)
     map)
   "Keymap for SpotList commands.")
 
 ;;;###autoload
-(with-eval-after-load 'spotlist
-(define-key global-map (kbd "C-c C-s") spotlist-command-map))
+(defun spotlist-setup-global-keys (&optional key)
+  "Install SpotList global key prefix.
+KEY is a key sequence string for the prefix (default: \"C-c C-s\").
+Example:
+  (spotlist-setup-global-keys)            ; uses C-c C-s
+  (spotlist-setup-global-keys \"C-c s\")  ; custom prefix"
+  (interactive)
+  (let ((prefix (or key "C-c C-s")))
+    (define-key global-map (kbd prefix) spotlist-command-map)))
 
 ;;; Mode definition
 
