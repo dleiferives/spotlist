@@ -32,12 +32,12 @@
 ;;
 ;; Features:
 ;; - Bookmark arbitrary text regions or lines
-;; - View all bookmarks in a dedicated buffer
-;; - Edit bookmarked text inline with live sync to source
+;; - View all bookmarks in a dedicated buffer (normal or compact view)
+;; - Edit bookmarked text inline with live sync to source (normal view only)
 ;; - Syntax highlighting preserved from source
-;; - Fold/unfold entries
+;; - Fold/unfold entries (normal view only)
 ;; - Jump to original locations
-;; - Undo/redo for inline edits
+;; - Undo/redo for inline edits (normal view only)
 ;; - Evil mode integration
 ;;
 ;; Usage:
@@ -48,19 +48,32 @@
 ;; In the SpotList buffer:
 ;;   C-c C-j     Jump to source location
 ;;   C-c C-d     Delete entry
-;;   C-c C-t     Toggle fold/unfold
+;;   C-c C-t     Toggle fold/unfold (normal view)
+;;   C-c C-a     Toggle fold all/unfold all (normal view)
+;;   C-c C-v     Toggle normal/compact view
+;;   C-c C-m     Adjust max dimensions for compact view
+;;   C-c C-M     Adjust current entry dimensions for compact view
+;;   C-c C-r     Reset current entry dimensions to global for compact view
 ;;   C-c C-g     Refresh
 ;;   C-c C-q     Quit
-;;   C-z, C-/    Undo
-;;   C-y         Redo
+;;   C-z, C-/    Undo (normal view)
+;;   C-y         Redo (normal view)
 ;;
 ;; Evil mode users get additional bindings:
 ;;   gd      Jump to source
 ;;   dd      Delete entry
-;;   za      Toggle fold
-;;   zM/zR   Fold/unfold all
-;;   u       Undo
-;;   C-r     Redo
+;;   za      Toggle fold (normal view)
+;;   zM/zR   Fold/unfold all (normal view)
+;;   v       Toggle view
+;;   m       Adjust max dimensions for compact view
+;;   M       Adjust current entry dimensions for compact view
+;;   R       Reset current entry dimensions to global for compact view
+;;   gr      Refresh
+;;   q       Quit
+;;   ZZ      Quit
+;;   ZQ      Quit
+;;   u       Undo (normal view)
+;;   C-r     Redo (normal view)
 
 (require 'cl-lib)
 
@@ -105,8 +118,10 @@ automatic refreshing resumes."
   end-marker        ; End marker
   text              ; Cached text with properties
   folded            ; Whether entry is folded
-  body-overlay      ; Overlay marking the editable body in SpotList
-  timestamp)        ; Creation time
+  body-overlay      ; Overlay marking the editable body in SpotList (normal view)
+  timestamp         ; Creation time
+  custom-width      ; Custom width for this entry (nil = use global default)
+  custom-height)    ; Custom height for this entry (nil = use global default)
 
 ;;; Variables
 
@@ -154,6 +169,9 @@ automatic refreshing resumes."
 
 (defvar spotlist-typing-resume-timer nil
   "Timer to resume visibility refresh after typing stops.")
+
+(defvar spotlist-view-mode 'normal
+  "Current view mode: 'normal or 'compact.")
 
 ;;; Color adjustment helpers
 
@@ -204,7 +222,8 @@ automatic refreshing resumes."
   "Keymap for SpotList commands.")
 
 ;;;###autoload
-(define-key global-map (kbd "C-c C-s") spotlist-command-map)
+(with-eval-after-load 'spotlist
+(define-key global-map (kbd "C-c C-s") spotlist-command-map))
 
 ;;; Mode definition
 
@@ -217,6 +236,13 @@ automatic refreshing resumes."
     (define-key map (kbd "C-c C-q") 'quit-window)
     (define-key map (kbd "C-c C-t") 'spotlist-toggle-fold)
     (define-key map (kbd "C-c C-a") 'spotlist-toggle-fold-all)
+    (define-key map (kbd "C-c C-v") 'spotlist-toggle-view) ; New view toggle
+    (define-key map (kbd "C-c C-m") 'spotlist-adjust-compact-dimensions) ; Adjust global compact dimensions
+    (define-key map (kbd "C-c C-M") 'spotlist-adjust-entry-dimensions) ; Adjust current entry dimensions
+    (define-key map (kbd "C-c C-r") 'spotlist-reset-entry-dimensions) ; Reset current entry dimensions
+    (define-key map (kbd "m") 'spotlist-adjust-compact-dimensions) ; For convenience
+    (define-key map (kbd "M") 'spotlist-adjust-entry-dimensions) ; For convenience
+    (define-key map (kbd "R") 'spotlist-reset-entry-dimensions) ; For convenience
     ;; Undo and Redo keys
     (define-key map (kbd "C-/") 'spotlist-undo)
     (define-key map (kbd "C-?") 'spotlist-redo) ; Shifted C-/ on many systems
@@ -289,32 +315,36 @@ automatic refreshing resumes."
 (defun spotlist-undo ()
   "Undo the last edit in SpotList buffer."
   (interactive)
-  (if (> (length spotlist-edit-history) (1+ spotlist-edit-history-position))
-      (progn
-        (setq spotlist-edit-history-position
-              (1+ spotlist-edit-history-position))
-        (let* ((state-with-point (nth spotlist-edit-history-position
-                                      spotlist-edit-history))
-               (saved-point (car state-with-point))
-               (state (cdr state-with-point)))
-          (spotlist-restore-state state saved-point)
-          (message "Undo!")))
-    (message "No further undo information")))
+  (if (eq spotlist-view-mode 'compact)
+      (message "Undo is not available in compact view.")
+    (if (> (length spotlist-edit-history) (1+ spotlist-edit-history-position))
+        (progn
+          (setq spotlist-edit-history-position
+                (1+ spotlist-edit-history-position))
+          (let* ((state-with-point (nth spotlist-edit-history-position
+                                        spotlist-edit-history))
+                 (saved-point (car state-with-point))
+                 (state (cdr state-with-point)))
+            (spotlist-restore-state state saved-point)
+            (message "Undo!")))
+      (message "No further undo information"))))
 
 (defun spotlist-redo ()
   "Redo the last undone edit in SpotList buffer."
   (interactive)
-  (if (> spotlist-edit-history-position 0)
-      (progn
-        (setq spotlist-edit-history-position
-              (1- spotlist-edit-history-position))
-        (let* ((state-with-point (nth spotlist-edit-history-position
-                                      spotlist-edit-history))
-               (saved-point (car state-with-point))
-               (state (cdr state-with-point)))
-          (spotlist-restore-state state saved-point)
-          (message "Redo!")))
-    (message "No further redo information")))
+  (if (eq spotlist-view-mode 'compact)
+      (message "Redo is not available in compact view.")
+    (if (> spotlist-edit-history-position 0)
+        (progn
+          (setq spotlist-edit-history-position
+                (1- spotlist-edit-history-position))
+          (let* ((state-with-point (nth spotlist-edit-history-position
+                                        spotlist-edit-history))
+                 (saved-point (car state-with-point))
+                 (state (cdr state-with-point)))
+            (spotlist-restore-state state saved-point)
+            (message "Redo!")))
+      (message "No further redo information"))))
 
 ;;; Evil integration
 
@@ -332,6 +362,10 @@ automatic refreshing resumes."
     "za" 'spotlist-toggle-fold
     "zM" 'spotlist-fold-all
     "zR" 'spotlist-unfold-all
+    "v" 'spotlist-toggle-view          ; Added for view toggle
+    "m" 'spotlist-adjust-compact-dimensions ; Adjust global compact dimensions
+    "M" 'spotlist-adjust-entry-dimensions ; Adjust current entry dimensions
+    "R" 'spotlist-reset-entry-dimensions ; Reset current entry dimensions
     "gr" 'spotlist-refresh
     "q" 'quit-window
     "ZZ" 'quit-window
@@ -351,26 +385,32 @@ automatic refreshing resumes."
 (defun spotlist-fold-all ()
   "Fold all entries."
   (interactive)
-  (when (spotlist-check-not-editing)
-    (dolist (entry spotlist-entries)
-      (setf (spotlist-entry-folded entry) t))
-    (spotlist-render)))
+  (if (eq spotlist-view-mode 'compact)
+      (message "Fold/unfold is not available in compact view.")
+    (when (spotlist-check-not-editing)
+      (dolist (entry spotlist-entries)
+        (setf (spotlist-entry-folded entry) t))
+      (spotlist-render))))
 
 (defun spotlist-unfold-all ()
   "Unfold all entries."
   (interactive)
-  (when (spotlist-check-not-editing)
-    (dolist (entry spotlist-entries)
-      (setf (spotlist-entry-folded entry) nil))
-    (spotlist-render)))
+  (if (eq spotlist-view-mode 'compact)
+      (message "Fold/unfold is not available in compact view.")
+    (when (spotlist-check-not-editing)
+      (dolist (entry spotlist-entries)
+        (setf (spotlist-entry-folded entry) nil))
+      (spotlist-render))))
 
 (defun spotlist-check-not-editing ()
   "Check if we're not currently editing. Return t if safe to proceed."
-  (if spotlist-in-editable-region
-      (progn
-        (message "Exit insert mode first (ESC in Evil, or move cursor away)")
-        nil)
-    t))
+  (if (eq spotlist-view-mode 'compact)
+      t ; Always safe in compact view as it's read-only
+    (if spotlist-in-editable-region
+        (progn
+          (message "Exit insert mode first (ESC in Evil, or move cursor away)")
+          nil)
+      t)))
 
 ;;; Core functionality - Adding entries
 
@@ -415,7 +455,9 @@ automatic refreshing resumes."
                    :end-marker end-marker
                    :text text
                    :folded nil
-                   :timestamp (current-time))))
+                   :timestamp (current-time)
+                   :custom-width nil    ; Initialize with nil for global default
+                   :custom-height nil))) ; Initialize with nil for global default
       (setq spotlist-next-id (1+ spotlist-next-id))
       (push entry spotlist-entries)
       (spotlist-install-source-hook buf)
@@ -502,7 +544,7 @@ automatic refreshing resumes."
   "Show the SpotList buffer."
   (interactive)
   (let ((buf (get-buffer-create spotlist-buffer-name)))
-(spotlist-start-visibility-refresh)
+    (spotlist-start-visibility-refresh)
     (with-current-buffer buf
       (unless (eq major-mode 'spotlist-mode)
         (spotlist-mode))
@@ -530,7 +572,13 @@ automatic refreshing resumes."
     (display-buffer buf)))
 
 (defun spotlist-render ()
-  "Render the SpotList buffer content."
+  "Render the SpotList buffer content, dispatching based on view mode."
+  (if (eq spotlist-view-mode 'compact)
+      (spotlist-render-compact)
+    (spotlist-render-normal)))
+
+(defun spotlist-render-normal ()
+  "Render the SpotList buffer content in normal mode."
   (let ((old-point (point))
         (spotlist-inhibit-hooks t))
 
@@ -550,11 +598,11 @@ automatic refreshing resumes."
         (insert (propertize "SpotList\n" 'face 'bold))
         (if (and (fboundp 'evil-mode) (boundp 'evil-mode) evil-mode)
             ;; Use 'font-lock-constant-face for documentation-like text
-            (insert (propertize "RET/gd:jump dd:delete za:fold zM/zR:fold-all gr:refresh q:quit | i/a/c:edit inline\n"
+            (insert (propertize "RET/gd:jump dd:delete za:fold zM/zR:fold-all v:toggle-view M:adjust-entry m:adjust-global R:reset gr:refresh q:quit | i/a/c:edit inline\n"
                                 'face 'font-lock-constant-face)
                     (propertize "u:undo C-r:redo\n\n"
                                 'face 'font-lock-constant-face))
-          (insert (propertize "C-c C-j:jump C-c C-d:delete C-c C-t:fold C-c C-g:refresh C-c C-q:quit\n"
+          (insert (propertize "C-c C-j:jump C-c C-d:delete C-c C-t:fold C-c C-a:fold-all C-c C-v:toggle-view C-c C-M:adjust-entry C-c C-m:adjust-global C-c C-r:reset C-c C-g:refresh C-c C-q:quit\n"
                               'face 'font-lock-constant-face)
                   (propertize "C-z/C-/:undo C-y:redo\n\n"
                               'face 'font-lock-constant-face)))
@@ -594,7 +642,7 @@ automatic refreshing resumes."
     ;; Header line (protected)
     (let ((header-start (point)))
       (insert (propertize (format "[%d] %s (%d chars)\n"
-                                  id buf-name (length text))
+                                  id buf-name (length (substring-no-properties text)))
                           'face 'font-lock-warning-face
                           'spotlist-entry-id id))
       (spotlist-make-protected header-start (point)))
@@ -603,8 +651,8 @@ automatic refreshing resumes."
     (let ((body-start (point)))
       (if folded
           (progn
-            (let ((first-line (car (split-string text "\n")))
-                  (has-more (string-match-p "\n" text)))
+            (let ((first-line (car (split-string (or text "") "\n" t))) ; Preserve properties
+                  (has-more (string-match-p "\n" (or text ""))))
               (insert first-line)
               (when has-more
                 (insert (propertize " …" 'face 'shadow))))
@@ -634,7 +682,8 @@ automatic refreshing resumes."
 (defun spotlist-post-command ()
   "Update whether point is in an editable region."
   (setq spotlist-in-editable-region
-        (and (spotlist-find-entry-at-pos (point))
+        (and (eq spotlist-view-mode 'normal) ; Only editable in normal mode
+             (spotlist-find-entry-at-pos (point))
              (not (spotlist-in-protected-region-p (point))))))
 
 (defun spotlist-in-protected-region-p (pos)
@@ -647,7 +696,8 @@ automatic refreshing resumes."
 
 (defun spotlist-before-change (beg end)
   "Before change hook - save state before edit."
-  (when (and (not spotlist-inhibit-hooks)
+  (when (and (eq spotlist-view-mode 'normal) ; Only react in normal mode
+             (not spotlist-inhibit-hooks)
              (not spotlist-undo-in-progress)
              (spotlist-find-entry-at-pos beg))
     ;; This is a real edit in an editable region - save state!
@@ -655,7 +705,8 @@ automatic refreshing resumes."
 
 (defun spotlist-after-change (beg end old-len)
   "After change hook - sync edits to source buffer."
-  (unless (or spotlist-inhibit-hooks spotlist-undo-in-progress)
+  (unless (or spotlist-inhibit-hooks spotlist-undo-in-progress
+              (eq spotlist-view-mode 'compact)) ; Don't react in compact view
     ;; Find which entry was edited
     (let ((entry (spotlist-find-entry-at-pos beg)))
       (when entry
@@ -693,7 +744,7 @@ automatic refreshing resumes."
   "Sync ENTRY's current text in SpotList back to source buffer."
   (let ((ov (spotlist-entry-body-overlay entry)))
     (when (and ov (overlay-buffer ov))
-      (let* ((new-text (buffer-substring-no-properties
+      (let* ((new-text (buffer-substring
                         (overlay-start ov)
                         (overlay-end ov)))
              (buf (spotlist-entry-buf entry))
@@ -716,8 +767,8 @@ automatic refreshing resumes."
           (run-with-timer 0.1 nil
                          (lambda ()
                            (when (buffer-live-p buf)
-                             (with-current-buffer buf
-                               (spotlist-recompute-entry-text entry))))))))))
+                             (with-current-buffer buf)
+                             (spotlist-recompute-entry-text entry)))))))))
 
 ;;; Navigation and interaction
 
@@ -773,7 +824,8 @@ automatic refreshing resumes."
 
 (defun spotlist-is-typing-p ()
   "Return non-nil if user is currently typing in an editable region."
-  (and spotlist-last-typing-time
+  (and (eq spotlist-view-mode 'normal) ; Only typing in normal mode
+       spotlist-last-typing-time
        spotlist-in-editable-region
        (< (float-time (time-since spotlist-last-typing-time))
           spotlist-typing-pause-duration)))
@@ -823,45 +875,488 @@ automatic refreshing resumes."
 (defun spotlist-toggle-fold ()
   "Toggle fold state of entry at point."
   (interactive)
-  (let ((entry (spotlist-entry-near-point)))
-    (unless entry
-      (user-error "No entry at point"))
-    (setf (spotlist-entry-folded entry)
-          (not (spotlist-entry-folded entry)))
-    (let ((spotlist-inhibit-hooks t))
-      (spotlist-render))))
+  (if (eq spotlist-view-mode 'compact)
+      (message "Fold/unfold is not available in compact view.")
+    (let ((entry (spotlist-entry-near-point)))
+      (unless entry
+        (user-error "No entry at point"))
+      (setf (spotlist-entry-folded entry)
+            (not (spotlist-entry-folded entry)))
+      (let ((spotlist-inhibit-hooks t))
+        (spotlist-render)))))
 
 (defun spotlist-toggle-fold-all ()
   "Toggle fold state of all entries."
   (interactive)
-  (let ((any-unfolded (cl-some (lambda (e) (not (spotlist-entry-folded e)))
-                               spotlist-entries)))
+  (if (eq spotlist-view-mode 'compact)
+      (message "Fold/unfold is not available in compact view.")
+    (let ((any-unfolded (cl-some (lambda (e) (not (spotlist-entry-folded e)))
+                                 spotlist-entries)))
+      (dolist (entry spotlist-entries)
+        (setf (spotlist-entry-folded entry) any-unfolded))
+      (let ((spotlist-inhibit-hooks t))
+        (spotlist-render)))))
+
+;;; Compact/Tiled View
+
+(defcustom spotlist-compact-max-entry-width 50
+  "Maximum width for an entry in compact view."
+  :type 'integer
+  :group 'spotlist)
+
+(defcustom spotlist-compact-max-entry-height 6
+  "Maximum height for an entry in compact view (in lines)."
+  :type 'integer
+  :group 'spotlist)
+
+(cl-defstruct spotlist-layout-box
+  "Structure representing a positioned entry in the layout."
+  entry        ; The spotlist-entry
+  x            ; Column position
+  y            ; Row position (in lines)
+  width        ; Width in characters
+  height       ; Height in lines
+  text-lines)  ; Pre-truncated text lines
+
+(cl-defstruct spotlist-layout
+  "Structure representing the complete layout solution."
+  boxes        ; List of spotlist-layout-box
+  total-width  ; Total width needed
+  total-height) ; Total height needed
+
+;;; Layout Solver
+
+(defun spotlist-expand-tabs (text &optional tab-width)
+  "Expand tabs in TEXT to spaces using TAB-WIDTH (default 4).
+Preserves text properties."
+  (let ((tw (or tab-width 4)))
+    (with-temp-buffer
+      (insert text)
+      (untabify (point-min) (point-max))
+      (buffer-substring (point-min) (point-max)))))
+
+(defun spotlist-dedent-text (text)
+  "Remove common leading whitespace from all lines in TEXT.
+Similar to Python's textwrap.dedent. Preserves empty lines and text properties."
+  (setq text (or text ""))
+  (let* ((lines (split-string text "\n" t))  ; Split but keep properties
+         (non-empty-lines (cl-remove-if
+                           (lambda (line) (string-match-p "\\`[ \t]*\\'" (or line "")))
+                           lines)))
+    (if (null non-empty-lines)
+        text
+      (let ((min-indent nil))
+        ;; Find minimum indent
+        (dolist (line non-empty-lines)
+          (when (string-match "\\`[ \t]*" line)
+            (let ((indent (length (match-string 0 line))))
+              (setq min-indent (if (numberp min-indent)
+                                   (min min-indent indent)
+                                 indent)))))
+        ;; Remove indent from all lines, preserving properties
+        (if (and (numberp min-indent) (> min-indent 0))
+            (with-temp-buffer
+              (insert text)
+              (goto-char (point-min))
+              (while (not (eobp))
+                (when (>= (- (line-end-position) (line-beginning-position)) min-indent)
+                  (delete-char min-indent))
+                (forward-line 1))
+              (buffer-substring (point-min) (point-max)))
+          text)))))
+
+(defun spotlist-calculate-entry-dimensions (text max-width max-height)
+  "Return cons of (width . height) for TEXT, within MAX-WIDTH/HEIGHT.
+TEXT should be dedented already."
+  (setq text (or text "")) ;; ensure string
+  (let* ((lines (split-string text "\n" nil))
+         (actual-height (min (length lines) (max 0 max-height)))
+         (actual-width 0))
+    (dotimes (i actual-height)
+      (let* ((l (or (nth i lines) ""))
+             (len (length (substring-no-properties l)))) ; Use display length
+        (setq actual-width (max actual-width len))))
+    (cons (max 15 (+ actual-width 4))
+          (max 3 (+ actual-height 2)))))
+
+(defun spotlist-solve-compact-layout (entries window-width)
+  "Shelf-pack ENTRIES for WINDOW-WIDTH."
+  (let* ((gap 1)
+         (boxes nil)
+         (shelf-x 0)
+         (shelf-y 0)
+         (shelf-height 0)
+         (total-width 0)
+         (total-height 0)
+         (win-w (max 20 (or window-width 80))))
+    (dolist (entry (reverse entries))
+      (let* ((max-width (or (spotlist-entry-custom-width entry)
+                           spotlist-compact-max-entry-width
+                           50))
+             (max-height (or (spotlist-entry-custom-height entry)
+                            spotlist-compact-max-entry-height
+                            6))
+             (text (or (spotlist-entry-text entry) ""))
+             ;; Keep properties through the entire pipeline
+             (expanded (spotlist-expand-tabs text))
+             (dedented (spotlist-dedent-text expanded))
+             (dims (spotlist-calculate-entry-dimensions
+                    (substring-no-properties dedented) max-width max-height)) ; Only strip for measuring
+             (box-w (car dims))
+             (box-h (cdr dims))
+             (tlines (spotlist-truncate-text dedented (max 0 (- box-w 4))
+                                             (max 0 (- box-h 2)))))
+        (when (and (> shelf-x 0)
+                   (> (+ shelf-x gap box-w) win-w))
+          (setq shelf-y (+ shelf-y shelf-height gap)
+                shelf-x 0
+                shelf-height 0))
+        (push (make-spotlist-layout-box
+               :entry entry :x shelf-x :y shelf-y
+               :width box-w :height box-h :text-lines tlines)
+              boxes)
+        (setq shelf-height (max shelf-height box-h)
+              total-width (max total-width (+ shelf-x box-w))
+              total-height (max total-height (+ shelf-y box-h))
+              shelf-x (+ shelf-x box-w gap))))
+    (make-spotlist-layout
+     :boxes (nreverse boxes)
+     :total-width total-width
+     :total-height total-height)))
+
+(defun spotlist-truncate-text (text max-width max-height)
+  "Truncate TEXT to fit within MAX-WIDTH columns and MAX-HEIGHT lines.
+Returns a list of strings (lines) with text properties preserved."
+  (setq text (or text ""))
+  (with-temp-buffer
+    (insert text)
+    (goto-char (point-min))
+    (let ((result nil)
+          (line-count 0))
+      (catch 'done
+        (while (not (eobp))
+          (when (>= line-count max-height)
+            (throw 'done nil))
+
+          (let* ((line-start (point))
+                 (line-end (line-end-position))
+                 (line-text (buffer-substring line-start line-end))
+                 (line-length (length (substring-no-properties line-text))))
+
+            (cond
+             ;; Line fits completely
+             ((<= line-length max-width)
+              (push line-text result)
+              (setq line-count (1+ line-count))
+              (forward-line 1))
+
+             ;; Line needs truncation
+             (t
+              ;; Truncate to max-width characters (counting actual chars, not display width)
+              (let ((truncated-end (min (+ line-start max-width) line-end)))
+                (push (buffer-substring line-start truncated-end) result)
+                (setq line-count (1+ line-count)))
+              ;; Skip rest of line if we've hit max height, otherwise continue to next line
+              (if (>= line-count max-height)
+                  (throw 'done nil)
+                (forward-line 1)))))))
+
+      (setq result (nreverse result))
+
+      ;; Add ellipsis if we truncated (either height or width)
+      (when (or (not (eobp))
+                (and (> (length result) 0)
+                     (let* ((last-line (nth (1- (length result)) result))
+                            (orig-line-at-last (progn
+                                                 (goto-char (point-min))
+                                                 (forward-line (1- (length result)))
+                                                 (buffer-substring (point) (line-end-position)))))
+                       (< (length (substring-no-properties last-line))
+                          (length (substring-no-properties orig-line-at-last))))))
+        (when (> (length result) 0)
+          (let* ((last-idx (1- (length result)))
+                 (last-line (nth last-idx result))
+                 (last-line-plain (substring-no-properties last-line))
+                 ;; Ensure we have room for ellipsis
+                 (trim-to (max 0 (min (1- max-width) (1- (length last-line))))))
+            (setf (nth last-idx result)
+                  (concat (substring last-line 0 trim-to)
+                          (propertize "…" 'face 'shadow))))))
+
+      result)))
+
+
+;;; Layout Renderer
+
+(defun spotlist-render-compact ()
+  "Render SpotList in compact tiled view."
+  (let ((old-point (point))
+        (spotlist-inhibit-hooks t))
+
+    ;; Clear old overlays
+    (remove-overlays (point-min) (point-max))
     (dolist (entry spotlist-entries)
-      (setf (spotlist-entry-folded entry) any-unfolded))
-    (let ((spotlist-inhibit-hooks t))
-      (spotlist-render))))
+      (when (spotlist-entry-body-overlay entry)
+        (delete-overlay (spotlist-entry-body-overlay entry))
+        (setf (spotlist-entry-body-overlay entry) nil)))
+
+    (let ((buffer-read-only nil))
+      (erase-buffer)
+
+      ;; Header
+      (let ((start (point)))
+        (insert (propertize "SpotList (Compact View - Read Only)\n" 'face 'bold))
+        (if (and (fboundp 'evil-mode) (boundp 'evil-mode) evil-mode)
+            (insert (propertize "gd:jump dd:delete v:toggle-view M:adjust-entry m:adjust-global R:reset gr:refresh q:quit\n\n"
+                                'face 'font-lock-constant-face))
+          (insert (propertize "C-c C-j:jump C-c C-d:delete C-c C-v:toggle-view C-c C-M:adjust-entry C-c C-m:adjust-global C-c C-r:reset C-c C-g:refresh C-c C-q:quit\n\n"
+                              'face 'font-lock-constant-face)))
+        (spotlist-make-protected start (point)))
+
+      (if (null spotlist-entries)
+          (let ((start (point)))
+            (insert (propertize "No entries. Add with: C-c C-s r (region) or C-c C-s l (line)\n"
+                                'face 'font-lock-constant-face))
+            (spotlist-make-protected start (point)))
+
+        ;; Solve layout
+        (let* ((window-width (max 80 (- (window-width) 2)))
+               (layout (spotlist-solve-compact-layout spotlist-entries window-width)))
+
+          ;; Render the solved layout
+          (spotlist-render-layout layout))))
+
+    (goto-char (min old-point (point-max)))))
+
+(defun spotlist-render-layout (layout)
+  "Render a solved LAYOUT (spotlist-layout)."
+  (let* ((boxes (or (spotlist-layout-boxes layout) '()))
+         (total-height (max 0 (or (spotlist-layout-total-height layout) 0)))
+         (grid (make-vector (1+ total-height) ""))) ;; prefill with empty strings
+    (dolist (box boxes)
+      (spotlist-render-box-to-grid box grid))
+    ;; Render grid without trailing newline
+    (dotimes (i (length grid))
+      (let ((line (aref grid i)))
+        (when (and line (not (string-empty-p line)))
+          (let ((start (point)))
+            (insert line)
+            (when (< i (1- (length grid))) ; Only add newline if not last line
+              (insert "\n"))
+            (spotlist-make-protected start (point))))))))
+
+(defun spotlist-render-box-to-grid (box grid)
+  "Render a single BOX into the GRID array."
+  (let* ((entry (spotlist-layout-box-entry box))
+         (x (spotlist-layout-box-x box))
+         (y (spotlist-layout-box-y box))
+         (width (spotlist-layout-box-width box))
+         (height (spotlist-layout-box-height box))
+         (text-lines (or (spotlist-layout-box-text-lines box) '()))
+         (id (spotlist-entry-id entry))
+         (buf (spotlist-entry-buf entry))
+         (raw-name (if (buffer-live-p buf) (buffer-name buf) "<killed>"))
+         (buf-name (format "%s" raw-name)) ; Ensure buf-name is string
+         (title-text (format "[%d] %s"
+                             (or id 0) ; Ensure ID is number, default to 0
+                             (substring buf-name 0 (min (length buf-name)
+                                                        (max 0 (- width 10))))))
+         (original-text (or (spotlist-entry-text entry) "")) ; Ensure string
+         (plain-original (spotlist-expand-tabs original-text))  ; Keep properties through expansion
+         (dedented-original (spotlist-dedent-text plain-original))
+         (is-dedented (not (string= (substring-no-properties plain-original)
+                                    (substring-no-properties dedented-original))))
+         (tooltip (format "%s%s%s"
+                          (if (or (spotlist-entry-custom-width entry)
+                                 (spotlist-entry-custom-height entry))
+                              (format "This entry: %dx%d • "
+                                     (or (spotlist-entry-custom-width entry)
+                                         spotlist-compact-max-entry-width)
+                                     (or (spotlist-entry-custom-height entry)
+                                         spotlist-compact-max-entry-height))
+                            "")
+                          (format "Global max: %dx%d • Press 'M' for entry, 'm' for global"
+                                  (or spotlist-compact-max-entry-width 50)
+                                  (or spotlist-compact-max-entry-height 6))
+                          (if is-dedented " • Indentation stripped" ""))))
+
+    ;; Top border with title
+    (spotlist-append-to-grid-line
+     grid y x
+     (propertize (format "┌%s%s┐"
+                        title-text
+                        (make-string (max 0 (- width 2 (string-width title-text))) ?─))
+                'face 'font-lock-keyword-face
+                'spotlist-entry-id id
+                'help-echo tooltip))
+
+    ;; Content lines - ensure ALL content has the entry-id property
+    (dotimes (i (length text-lines))
+      (let* ((line (nth i text-lines))
+             (line-display-length (length (substring-no-properties (or line ""))))
+             (padding-needed (max 0 (- width 2 line-display-length)))
+             (padding (propertize (make-string padding-needed ?\s)
+                                  'spotlist-entry-id id
+                                  'help-echo tooltip))
+             ;; Add the entry-id property to the content line itself
+             (line-with-id (if line
+                               (propertize (copy-sequence line)
+                                          'spotlist-entry-id id
+                                          'help-echo tooltip)
+                             "")))
+        (spotlist-append-to-grid-line
+         grid (+ y i 1) x
+         (concat
+          (propertize "│" 'face 'font-lock-keyword-face
+                      'spotlist-entry-id id
+                      'help-echo tooltip)
+          line-with-id  ; Insert line with entry-id property
+          padding       ; Add padding with entry-id property
+          (propertize "│" 'face 'font-lock-keyword-face
+                      'spotlist-entry-id id
+                      'help-echo tooltip)))))
+
+    ;; Pad remaining content lines
+    (dotimes (i (- (max 0 (- height 2)) (length text-lines)))
+      (let ((line-idx (+ i 1 (length text-lines))))
+        (spotlist-append-to-grid-line
+         grid (+ y line-idx) x
+         (concat
+          (propertize "│" 'face 'font-lock-keyword-face
+                      'spotlist-entry-id id
+                      'help-echo tooltip)
+          (propertize (make-string (max 0 (- width 2)) ?\s)
+                      'spotlist-entry-id id
+                      'help-echo tooltip)
+          (propertize "│" 'face 'font-lock-keyword-face
+                      'spotlist-entry-id id
+                      'help-echo tooltip)))))
+
+    ;; Bottom border
+    (spotlist-append-to-grid-line
+     grid (+ y height -1) x
+     (propertize (format "└%s┘" (make-string (max 0 (- width 2)) ?─))
+                'face 'font-lock-keyword-face
+                'spotlist-entry-id id
+                'help-echo tooltip))))
+
+(defun spotlist-append-to-grid-line (grid y x text)
+  "Append TEXT (string) to GRID line Y at column X, padding with spaces."
+  (let ((text (or text "")))
+    (when (and (integerp y) (>= y 0) (< y (length grid)))
+      (let* ((current (or (aref grid y) ""))
+             (current-display-len (string-width current)) ; Use display length
+             (pad-needed (max 0 (- x current-display-len)))
+             (pad (make-string pad-needed ?\s))
+             (new-line (concat current pad text)))
+        (aset grid y new-line)))))
+
+;;; View Toggle
+
+(defun spotlist-toggle-view ()
+  "Toggle between normal and compact view."
+  (interactive)
+  (setq spotlist-view-mode
+        (if (eq spotlist-view-mode 'normal) 'compact 'normal))
+  (let ((spotlist-inhibit-hooks t))
+    (spotlist-render))
+  (message "View mode: %s" spotlist-view-mode))
+
+(defun spotlist-adjust-compact-dimensions ()
+  "Interactively adjust maximum dimensions for compact view entries (global)."
+  (interactive)
+  (let* ((new-width (read-number
+                     (format "Max entry width (current: %d): "
+                            spotlist-compact-max-entry-width)
+                     spotlist-compact-max-entry-width))
+         (new-height (read-number
+                      (format "Max entry height (current: %d): "
+                             spotlist-compact-max-entry-height)
+                      spotlist-compact-max-entry-height)))
+    (setq spotlist-compact-max-entry-width (max 15 new-width)) ; Min width for title
+    (setq spotlist-compact-max-entry-height (max 3 new-height)) ; Min height for borders
+    (when (eq spotlist-view-mode 'compact)
+      (let ((spotlist-inhibit-hooks t))
+        (spotlist-render)))
+    (message "Global compact view dimensions: %dx%d"
+             spotlist-compact-max-entry-width
+             spotlist-compact-max-entry-height)))
+
+(defun spotlist-adjust-entry-dimensions ()
+  "Interactively adjust dimensions for the entry at point."
+  (interactive)
+  (let ((entry (spotlist-entry-near-point)))
+    (unless entry
+      (user-error "No entry at point"))
+    (let* ((current-width (or (spotlist-entry-custom-width entry)
+                             spotlist-compact-max-entry-width))
+           (current-height (or (spotlist-entry-custom-height entry)
+                              spotlist-compact-max-entry-height))
+           (new-width (read-number
+                       (format "Entry [%d] width (current: %d, global: %d): "
+                              (spotlist-entry-id entry)
+                              current-width
+                              spotlist-compact-max-entry-width)
+                       current-width))
+           (new-height (read-number
+                        (format "Entry [%d] height (current: %d, global: %d): "
+                               (spotlist-entry-id entry)
+                               current-height
+                               spotlist-compact-max-entry-height)
+                        current-height)))
+      (setf (spotlist-entry-custom-width entry) (max 15 new-width))
+      (setf (spotlist-entry-custom-height entry) (max 3 new-height))
+      (when (eq spotlist-view-mode 'compact)
+        (let ((spotlist-inhibit-hooks t))
+          (spotlist-render)))
+      (message "Entry [%d] dimensions: %dx%d"
+               (spotlist-entry-id entry)
+               (spotlist-entry-custom-width entry)
+               (spotlist-entry-custom-height entry)))))
+
+(defun spotlist-reset-entry-dimensions ()
+  "Reset the current entry's dimensions to use global defaults."
+  (interactive)
+  (let ((entry (spotlist-entry-near-point)))
+    (unless entry
+      (user-error "No entry at point"))
+    (setf (spotlist-entry-custom-width entry) nil)
+    (setf (spotlist-entry-custom-height entry) nil)
+    (when (eq spotlist-view-mode 'compact)
+      (let ((spotlist-inhibit-hooks t))
+        (spotlist-render)))
+    (message "Entry [%d] reset to global dimensions (%dx%d)"
+             (spotlist-entry-id entry)
+             spotlist-compact-max-entry-width
+             spotlist-compact-max-entry-height)))
+
 
 ;;; Helper functions
 
 (defun spotlist-entry-near-point ()
-  "Get entry at or near point."
-  (or (spotlist-find-entry-at-pos (point))
-      ;; Try looking backward for an entry
-      (save-excursion
-        (let ((id nil))
-          (while (and (not id) (not (bobp)))
-            (forward-line -1)
-            (setq id (get-text-property (point) 'spotlist-entry-id)))
-          (when id
-            (cl-find id spotlist-entries :key #'spotlist-entry-id))))
-      ;; Try looking forward
-      (save-excursion
-        (let ((id nil))
-          (while (and (not id) (not (eobp)))
-            (forward-line 1)
-            (setq id (get-text-property (point) 'spotlist-entry-id)))
-          (when id
-            (cl-find id spotlist-entries :key #'spotlist-entry-id))))))
+  "Get entry at or near point.
+In compact view, uses the `spotlist-entry-id` property on the rendered box."
+  (if (eq spotlist-view-mode 'compact)
+      (let ((id (get-text-property (point) 'spotlist-entry-id)))
+        (when id
+          (cl-find id spotlist-entries :key #'spotlist-entry-id)))
+    (or (spotlist-find-entry-at-pos (point))
+        ;; Try looking backward for an entry
+        (save-excursion
+          (let ((id nil))
+            (while (and (not id) (not (bobp)))
+              (forward-line -1)
+              (setq id (get-text-property (point) 'spotlist-entry-id)))
+            (when id
+              (cl-find id spotlist-entries :key #'spotlist-entry-id))))
+        ;; Try looking forward
+        (save-excursion
+          (let ((id nil))
+            (while (and (not id) (not (eobp)))
+              (forward-line 1)
+              (setq id (get-text-property (point) 'spotlist-entry-id)))
+            (when id
+              (cl-find id spotlist-entries :key #'spotlist-entry-id)))))))
 
 ;;; Cleanup
 
