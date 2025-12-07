@@ -4,6 +4,7 @@
 
 SpotList is an Emacs package that provides live-tracking, navigable bookmarks for text regions. Unlike traditional bookmarks, SpotList lets you **edit bookmarked text inline** with changes automatically syncing back to the source buffer. 
 
+![recording](https://github.com/user-attachments/assets/dd17af06-673e-4dba-9090-ae9bc39c912a)
 
 ## Features
 
